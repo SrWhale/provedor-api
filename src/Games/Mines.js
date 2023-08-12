@@ -4,6 +4,8 @@ const { Collection } = require('@discordjs/collection');
 
 const { Session } = require('../Structures');
 
+const { post } = require('axios');
+
 class Mines extends Game {
     constructor(client) {
         super(client);
@@ -23,39 +25,40 @@ class Mines extends Game {
 
     }
 
-    async create(req, res) {
-
-        const { user, access_token } = req.query;
-
-        const session = this.sessions.find(s => s.user === user && s.access_token === access_token);
-
-        if (session) return res.json({ error: 'Game alreads exist' });
-
-        const newS = new Session(this, user, access_token);
-
-        this.sessions.set(user, newS);
-
-        return true
-    }
-
     async createGame(req, res) {
-        const { user, mines, access_token } = req.query;
+        const { mines, access_token, provider, value, multiplier } = req.query;
 
-        const session = this.sessions.find(s => s.user === user && s.access_token === access_token);
+        const session = this.sessions.find(s => s.provider === provider && s.access_token === access_token);
 
         if (!session) return res.json({ error: 'Invalid access token' });
 
         if (session.game) return res.json({ error: 'User already in game', lastGrid: session.game.grid.reduce((a, b) => a.concat(b), []).map(g => g.open ? 1 : 0) });
 
-        const grid = await this.generateMine({
-            rows: 5,
-            columns: 5,
-            mines: mines
-        });
+        post(`${this.client.providers[provider].url}/${provider}/apost`, {
+            access_token,
+            amount: Number(value),
+        }).then(async (request) => {
+            const grid = await this.generateMine({
+                rows: 5,
+                columns: 5,
+                mines: mines
+            });
 
-        session.game = { grid, user, access_token };
+            session.game = { grid, access_token };
 
-        return res.json({ success: true });
+            session.apostData = {
+                value,
+                mines,
+                id: request.data.operator_tx_id
+            };
+
+            session.save();
+
+            return res.json({ success: true, newBalance: request.data.new_balance });
+        }).catch(err => {
+            console.log(err)
+            return res.json({ error: err.response.data.message });
+        })
     };
 
     get customRoutes() {
@@ -68,14 +71,73 @@ class Mines extends Game {
                 path: '/mines/newGame',
                 method: 'get',
                 callback: this.createGame.bind(this)
+            }, {
+                path: '/mines/checkGame',
+                method: 'get',
+                callback: this.checkGame.bind(this)
+            }, {
+                path: '/mines/endGame',
+                method: 'get',
+                callback: this.endGame.bind(this)
             }
         ]
     }
 
-    async openMine(req, res) {
-        const { user, row, column, access_token } = req.query;
+    async endGame(req, res) {
+        const { access_token, provider } = req.query;
 
-        const session = this.sessions.find(s => s.user === user && s.access_token === access_token);
+        const session = this.sessions.find(s => s.provider === provider && s.access_token === access_token);
+
+        if (!session) return res.json({ error: 'Invalid access token' });
+
+        if (!session.game) return res.json({ error: 'No game found' });
+
+        const game = session.game;
+
+        const providerUrl = this.client.providers[provider]
+        console.log(session.apostData.mines)
+        const PROBABILITY = (25 - Number(session.apostData.mines)) / 25;
+
+        const opennedMines = game.grid.reduce((a, b) => a.concat(b), []).filter(g => g.open).length;
+
+        const multiplier = 0.97 / Math.pow(PROBABILITY, opennedMines);
+        console.log(multiplier, PROBABILITY, opennedMines, session.apostData.value)
+        const valueToReceive = Number(session.apostData.value) * multiplier;
+        console.log(valueToReceive)
+        post(`${providerUrl.url}/${provider}/rewards`, {
+            access_token: access_token,
+            transaction_id: session.apostData.id,
+            amount: valueToReceive
+        }).then(() => {
+            session.game = null;
+
+            session.apostData = null;
+
+            session.save();
+
+            return res.json({ success: true, grid: game.grid, receivedValue: valueToReceive });
+        }).catch(err => {
+            console.log(err)
+            return res.json({ error: err.response.data.message });
+        })
+    }
+
+    async checkGame(req, res) {
+        const { access_token, provider } = req.query;
+
+        const session = this.sessions.find(s => s.provider === provider && s.access_token === access_token)
+
+        if (!session) return res.json({ status: false });
+
+        if (!session.game) return res.json({ status: false });
+
+        return res.json({ status: true, game: session.game.grid.reduce((a, b) => a.concat(b), []).map(g => g.open ? 1 : 0) }).end()
+    }
+
+    async openMine(req, res) {
+        const { row, column, access_token, provider } = req.query;
+
+        const session = this.sessions.find(s => s.provider === provider && s.access_token === access_token);
 
         if (!session) return res.json({ error: 'Invalid access token' });
 
@@ -91,9 +153,22 @@ class Mines extends Game {
 
         if (grid.open) return res.json({ error: 'Mine already open' });
 
-        grid.open = true;
+        game.grid[row][column].open = true;
 
-        if (grid.number === 1) session.game = null;
+        if (grid.number === 1) {
+            session.game = null;
+
+            const providerUrl = this.client.providers[provider]
+
+            post(`${providerUrl.url}/${provider}/loses`, {
+                access_token: access_token,
+                transaction_id: session.apostData.id
+            });
+
+            session.apostData = null;
+        }
+
+        session.save();
 
         return res.json({
             result: grid.number === 1 ? 'Mine' : "Win",

@@ -37,6 +37,17 @@ class Server {
 
         this.routes.forEach(route => {
             app[route.method](route.path, (req, res) => {
+
+                const { provider, access_token } = req.query;
+
+                if (!provider) return res.status(400).json({ error: 'No provider provided' });
+
+                if (!access_token) return res.status(400).json({ error: 'No access_token provided' });
+
+                const providerUrl = this.client.providers[provider];
+
+                if (!providerUrl) return res.status(400).json({ error: 'No provider found' });
+
                 route.callback(req, res);
             })
         })

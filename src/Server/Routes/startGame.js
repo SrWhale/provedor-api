@@ -7,31 +7,29 @@ class StartGame extends Route {
 
     async callback(req, res) {
 
-        const { id, user, access_token } = req.query;
+        const { id, access_token, provider } = req.query;
 
-        if (!id) return res.json({ error: 'No id provided' });
+        if (!id) return res.status(400).json({ error: 'No id provided' });
 
-        if (!user) return res.json({ error: 'No user provided' });
+        if (!provider) return res.status(400).json({ error: 'No provider provided' });
 
-        if (!access_token) return res.json({ error: 'No access token provided' });
+        if (!access_token) return res.status(400).json({ error: 'No access token provided' });
 
         const game = this.client.games.get(id);
 
-        if (!game) return res.json({ error: 'No game founde' });
+        if (!game) return res.status(400).json({ error: 'No game founde' });
 
-        const check = game.sessions.find(s => s.user === user && s.access_token === access_token);
+        const check = game.sessions.find(s => s.provider === provider && s.access_token === access_token);
 
-        if (check) return res.json({ error: 'User already in game' });
-
-        const session = new Session(game, user, access_token);
-
-        session.start();
-
-        game.sessions.set(user, session);
-
-        const params = new URLSearchParams({ user, access_token });
+        const params = new URLSearchParams({ access_token, provider });
 
         const url = `${this.client.providerURL}/${game.displayName}?${params}`;
+
+        if (check) return res.json({ success: true, url: url, always: true });
+
+        const session = new Session(game, access_token, provider);
+
+        game.sessions.set(session.uuid, session);
 
         return res.json({ success: true, url });
     }
